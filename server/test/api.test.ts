@@ -4225,7 +4225,7 @@ describe("health", () => {
   it("reports ok when the database answers", async () => {
     const res = await app.inject({ method: "GET", url: "/api/health" });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true });
+    expect(res.json()).toEqual({ ok: true, revision: process.env.APP_REVISION || null });
   });
 });
 

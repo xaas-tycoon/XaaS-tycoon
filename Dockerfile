@@ -19,6 +19,10 @@ RUN npm run build
 FROM node:24-slim
 WORKDIR /app
 ENV NODE_ENV=production
+# The commit the image was built from, which /api/health reports: CI passes it, so its deploy job can tell when the new
+# image is the one serving.
+ARG GIT_REVISION=""
+ENV APP_REVISION=$GIT_REVISION
 
 COPY package.json package-lock.json ./
 COPY sim/package.json sim/

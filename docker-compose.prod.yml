@@ -19,7 +19,9 @@ services:
       retries: 20
 
   app:
-    build: .
+    # Built and pushed by CI (.github/workflows/ci.yml), so the VPS only pulls it: ghcr.io/<org>/xaas-tycoon:latest.
+    image: ${APP_IMAGE:?Set APP_IMAGE, for example ghcr.io/<org>/xaas-tycoon:latest}
+    pull_policy: always
     restart: unless-stopped
     environment:
       # Use letters and digits only for POSTGRES_PASSWORD, as it goes into this URL as it is.

@@ -484,10 +484,11 @@ export async function buildApp(opts: AppOptions) {
 
   // --- public ---
 
-  // For the container's HEALTHCHECK and the deploy smoke check: up, and can reach the database.
+  // For the container's HEALTHCHECK and the deploy smoke check: up, and can reach the database. The revision is the
+  // commit the image was built from (CI's deploy job waits for it), or null outside an image CI built.
   app.get("/api/health", async () => {
     await db.execute(sql`select 1`);
-    return { ok: true };
+    return { ok: true, revision: process.env.APP_REVISION || null };
   });
 
   // The numbers a game shows come from its own config: the current one for a new game, or the one a game started with.

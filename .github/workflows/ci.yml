@@ -1,0 +1,141 @@
+name: CI
+
+# Every push and PR: typecheck and the sim and server tests, against a real Postgres. On main, once they pass, the
+# production image is built here and pushed to GHCR, and Dokploy is told to redeploy: the VPS pulls the image and
+# never builds it.
+#
+# On GitHub's runners until Blacksmith verifies the xaas-tycoon org. Then switch back: runs-on to
+# blacksmith-4vcpu-ubuntu-2404 (all three jobs), actions/setup-node to useblacksmith/setup-node@v5,
+# docker/setup-buildx-action to useblacksmith/setup-docker-builder@v1 and docker/build-push-action to
+# useblacksmith/build-push-action@v2 without the cache-from/cache-to lines.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: xaas
+          POSTGRES_PASSWORD: xaas
+          POSTGRES_DB: xaas
+        # Same host port as docker-compose.yml, so the tests' default database URL works as it is.
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd="pg_isready -U xaas"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+
+  build:
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      # GHCR paths must be lowercase: ghcr.io/<org>/xaas-tycoon, following whichever org owns the repo.
+      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Shown by /api/health, so the deploy job can tell this commit is the one serving.
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+
+  # Pushing :latest doesn't redeploy anything by itself, so ask Dokploy to, only once the image is built: redeploying
+  # by hand while this is still building pulls the previous image. Through Dokploy's API (compose.redeploy): its
+  # per-service webhook expects a registry event's body and refuses a bare POST.
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Dokploy redeploy
+        id: trigger
+        env:
+          DOKPLOY_URL: ${{ secrets.DOKPLOY_URL }}
+          DOKPLOY_API_KEY: ${{ secrets.DOKPLOY_API_KEY }}
+          DOKPLOY_COMPOSE_ID: ${{ secrets.DOKPLOY_COMPOSE_ID }}
+        run: |
+          set -uo pipefail
+          if [ -z "${DOKPLOY_URL:-}" ] || [ -z "${DOKPLOY_API_KEY:-}" ] || [ -z "${DOKPLOY_COMPOSE_ID:-}" ]; then
+            echo "::warning::Dokploy secrets not set (DOKPLOY_URL, DOKPLOY_API_KEY, DOKPLOY_COMPOSE_ID): skipping the redeploy. Deploy by hand in Dokploy."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+          body=$(mktemp)
+          code=$(curl -s -o "$body" -w '%{http_code}' --max-time 60 \
+            -X POST "${DOKPLOY_URL%/}/api/compose.redeploy" \
+            -H "x-api-key: $DOKPLOY_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"composeId\":\"$DOKPLOY_COMPOSE_ID\",\"title\":\"CI $GITHUB_SHA\",\"description\":\"Auto-deploy from ${GITHUB_REF_NAME}\"}")
+          echo "Dokploy answered HTTP $code"
+          case "$code" in
+            2*) ;;
+            *) echo "response: $(head -c 500 "$body")"; echo "::error::Redeploy failed (HTTP $code)"; exit 1 ;;
+          esac
+
+      - name: Wait for this commit to go live
+        if: steps.trigger.outputs.skipped == 'false'
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: |
+          set -uo pipefail
+          if [ -z "${APP_URL:-}" ]; then
+            echo "::warning::APP_URL variable not set: can't check the live revision."
+            exit 0
+          fi
+          # Dokploy pulls, then the server migrates and starts: allow about 6 minutes.
+          for i in $(seq 1 36); do
+            # While the container restarts Traefik answers 502/503 with no JSON: that's "not live yet", not a failure.
+            live=$(curl -s --max-time 10 "${APP_URL%/}/api/health" 2>/dev/null \
+                   | jq -r 'if type == "object" then (.revision // empty) else empty end' 2>/dev/null || true)
+            if [ "$live" = "$GITHUB_SHA" ]; then
+              echo "Live: $live"
+              exit 0
+            fi
+            echo "attempt $i/36: live=${live:-<none>}"
+            sleep 10
+          done
+          echo "::error::$APP_URL never reported $GITHUB_SHA. Check the deploy log in Dokploy."
+          exit 1

@@ -34,19 +34,24 @@ Set `TEACHER_PASSWORD` and `SESSION_SECRET` in your environment first; the compo
 
 Production runs on a VPS through [Dokploy](https://dokploy.com), from `docker-compose.prod.yml`: the app and Postgres 18, with the database in a named volume so it survives redeploys. Postgres isn't published to the internet; only Dokploy's Traefik proxy reaches the app, and adds HTTPS.
 
-The image is a multi-stage build: production dependencies only, running as the `node` user with `NODE_ENV=production`. The server still runs its TypeScript through tsx, as in development, rather than a compiled build. A `HEALTHCHECK` calls `/api/health`, which answers `{"ok":true}` when the server can reach the database. Migrations run when the server starts.
+The VPS doesn't build the app. CI (`.github/workflows/ci.yml`, on GitHub's runners until [Blacksmith](https://blacksmith.sh) verifies the org) typechecks and tests every push and PR. On `main`, once they pass, it builds the image, pushes it to GHCR as `ghcr.io/<org>/xaas-tycoon:latest`, asks Dokploy to redeploy, and waits for `/api/health` to report the new commit.
+
+The image is a multi-stage build: production dependencies only, running as the `node` user with `NODE_ENV=production`. The server still runs its TypeScript through tsx, as in development, rather than a compiled build. A `HEALTHCHECK` calls `/api/health`, which answers `{"ok":true,"revision":"<commit>"}` when the server can reach the database (the revision is null in an image CI didn't build). Migrations run when the server starts.
 
 ### Setting it up
 
+0. **Blacksmith and GHCR.** Blacksmith only runs for repos owned by a GitHub org, once Blacksmith has verified it: until then CI runs on GitHub's runners, and the workflow's header says what to switch back. After CI's first run on `main`, the image is under the org's **Packages**: make it public (Package settings → Change visibility), or add GHCR as a registry in Dokploy with a token that can read packages.
 1. **Create the project.** In Dokploy, create a project (for example *XaaS Tycoon*), then **Create Service → Compose**.
-2. **Point it at the repo.** Choose GitHub (or Git) as the provider, pick `ash1688/XaaS-tycoon`, branch `main`, and set the compose path to `./docker-compose.prod.yml`. The compose type is *Docker Compose*.
+2. **Point it at the repo.** Choose GitHub (or Git) as the provider, pick the repo, branch `main`, and set the compose path to `./docker-compose.prod.yml`. The compose type is *Docker Compose*. Leave auto-deploy off: CI redeploys once the image is built, and a push-triggered deploy would pull the old one.
 3. **Set the environment.** In the service's **Environment** tab, add the variables below. Make each secret with `openssl rand -hex 32`, and keep them in a password manager, not in the repo.
 4. **Attach the domain.** In **Domains**, add your domain (for example `xaas.example.co.uk`) for service `app`, container port `3080`, with HTTPS on and Let's Encrypt as the certificate. Point the domain's DNS A record at the VPS first, or the certificate can't be issued.
 5. **Deploy.** Press **Deploy** and watch the log. A missing secret stops it early with `required variable ... is missing a value`. When the app container shows as healthy, run the checks below.
-6. **Redeploy.** Press **Deploy** again after merging to `main`, or turn on auto-deploy in the service's settings. Redeploying rebuilds the app and keeps the `pgdata` volume, so games and codes stay.
+6. **Hook up CI.** In Dokploy, make an API key (your avatar → **Profile** → **API/CLI** → generate), and find the service's compose ID: the last part of its page's URL, after `/compose/` (not the **Deployments** tab's webhook, whose token is a different one). In the repo's **Settings → Secrets and variables → Actions**, add the secrets `DOKPLOY_URL` (your Dokploy address, for example `https://dokploy.example.co.uk`), `DOKPLOY_API_KEY` and `DOKPLOY_COMPOSE_ID`, and the variable `APP_URL` (`https://<your domain>`). Without them CI still builds the image, and warns that it skipped the redeploy.
+7. **Redeploy.** Merging to `main` redeploys by itself through CI. **Deploy** in Dokploy pulls the latest image again. Redeploying keeps the `pgdata` volume, so games and codes stay.
 
 | Variable | Required | What it does |
 | --- | --- | --- |
+| `APP_IMAGE` | Yes | The image CI pushes: `ghcr.io/<org>/xaas-tycoon:latest`, the org in lowercase. |
 | `POSTGRES_PASSWORD` | Yes | The database password. The compose file builds `DATABASE_URL` from it, so use letters and digits only (`openssl rand -hex 32`). Keep it once set: Postgres only reads it when the volume is first created. |
 | `TEACHER_PASSWORD` | Yes | The password for `/staff`. Share it only with teaching staff. |
 | `SESSION_SECRET` | Yes | Signs the teacher's sign-in cookie; at least 32 characters. Changing it signs every teacher out. |
@@ -82,7 +87,7 @@ The data itself is in the Docker volume named `<compose project>_pgdata` (`docke
 
 From a college machine, on the college network:
 
-1. `https://<your domain>/api/health` shows `{"ok":true}`, with a padlock and no certificate warning.
+1. `https://<your domain>/api/health` shows `{"ok":true,...}` with the latest commit on `main` as its revision, with a padlock and no certificate warning.
 2. `https://<your domain>/staff`: a wrong password is refused, and `TEACHER_PASSWORD` signs in.
 3. Create a login code.
 4. In a private window, enter that code on the home page, start a company and press **Continue** a few times.
