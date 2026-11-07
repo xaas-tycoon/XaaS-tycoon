@@ -8,7 +8,10 @@ import { playDay, STRATEGIES } from "../scripts/harness.ts";
 // change gameplay (a speed-up, a tidy) must leave every hash as it is. A change that's meant to alter the game updates
 // them with `npx vitest run -u test/gameplay.test.ts` in sim, and the diff shows which games it touched.
 const sim = createSim(defaultConfig);
-const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
+// Fractions are hashed to 12 significant figures: Math.pow and friends round their last bit differently on Windows and
+// Linux, so CI's hashes would otherwise differ from a Windows machine's by noise no game can see.
+const steady = (_key: string, v: unknown) => (typeof v === "number" && !Number.isInteger(v) ? Number(v.toPrecision(12)) : v);
+const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value, steady)).digest("hex").slice(0, 16);
 
 /** A migration quote, or why it's refused (one already under way, say). */
 function quoteOrRefusal(state: GameState, target: string) {
