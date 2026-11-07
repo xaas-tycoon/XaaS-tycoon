@@ -34,13 +34,13 @@ Set `TEACHER_PASSWORD` and `SESSION_SECRET` in your environment first; the compo
 
 Production runs on a VPS through [Dokploy](https://dokploy.com), from `docker-compose.prod.yml`: the app and Postgres 18, with the database in a named volume so it survives redeploys. Postgres isn't published to the internet; only Dokploy's Traefik proxy reaches the app, and adds HTTPS.
 
-The VPS doesn't build the app. CI (`.github/workflows/ci.yml`, on [Blacksmith](https://blacksmith.sh) runners) typechecks and tests every push and PR. On `main`, once they pass, it builds the image, pushes it to GHCR as `ghcr.io/<org>/xaas-tycoon:latest`, asks Dokploy to redeploy, and waits for `/api/health` to report the new commit.
+The VPS doesn't build the app. CI (`.github/workflows/ci.yml`, on GitHub's runners until [Blacksmith](https://blacksmith.sh) verifies the org) typechecks and tests every push and PR. On `main`, once they pass, it builds the image, pushes it to GHCR as `ghcr.io/<org>/xaas-tycoon:latest`, asks Dokploy to redeploy, and waits for `/api/health` to report the new commit.
 
 The image is a multi-stage build: production dependencies only, running as the `node` user with `NODE_ENV=production`. The server still runs its TypeScript through tsx, as in development, rather than a compiled build. A `HEALTHCHECK` calls `/api/health`, which answers `{"ok":true,"revision":"<commit>"}` when the server can reach the database (the revision is null in an image CI didn't build). Migrations run when the server starts.
 
 ### Setting it up
 
-0. **Blacksmith and GHCR.** Blacksmith only runs for repos owned by a GitHub org: the repo belongs to one, with the [Blacksmith app](https://github.com/apps/blacksmith-sh) installed on it. After CI's first run on `main`, the image is under the org's **Packages**: make it public (Package settings → Change visibility), or add GHCR as a registry in Dokploy with a token that can read packages.
+0. **Blacksmith and GHCR.** Blacksmith only runs for repos owned by a GitHub org, once Blacksmith has verified it: until then CI runs on GitHub's runners, and the workflow's header says what to switch back. After CI's first run on `main`, the image is under the org's **Packages**: make it public (Package settings → Change visibility), or add GHCR as a registry in Dokploy with a token that can read packages.
 1. **Create the project.** In Dokploy, create a project (for example *XaaS Tycoon*), then **Create Service → Compose**.
 2. **Point it at the repo.** Choose GitHub (or Git) as the provider, pick the repo, branch `main`, and set the compose path to `./docker-compose.prod.yml`. The compose type is *Docker Compose*. Leave auto-deploy off: CI redeploys once the image is built, and a push-triggered deploy would pull the old one.
 3. **Set the environment.** In the service's **Environment** tab, add the variables below. Make each secret with `openssl rand -hex 32`, and keep them in a password manager, not in the repo.
